@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "types.h": "c",
+        "netdb.h": "c",
+        "socket.h": "c",
+        "ostream": "c",
+        "system_error": "c"
+    }
+}
