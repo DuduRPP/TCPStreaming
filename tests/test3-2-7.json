@@ -1,0 +1,7 @@
+{
+    "method": "GET",
+    "resource": "/movies/genre",
+    "body": {
+      "query": "Historical Drama"
+    }
+  }

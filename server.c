@@ -2,11 +2,14 @@
 ** server.c -- a stream socket server demo
 */
 
+// Include base C libraries
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+
+// Include base C socket programming libraries
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -15,9 +18,31 @@
 #include <sys/wait.h>
 #include <signal.h>
 
-#define PORT "8080"  // the port users will be connecting to
+// External libraries for SQLite Database and JSON parser
+#include <sqlite3.h>
+#include "vendor/cJSON/cJSON.h"
+
+#define PORT "7777"  // the port users will be connecting to
+#define MAXDATASIZE 2048 // max number of bytes we can get at once 
 
 #define BACKLOG 10   // how many pending connections queue will hold
+
+#define MAX_GENRES 10 // Max number of genres in a single movie
+
+// JSON Request Struct
+typedef struct {
+    char method[16];  // "GET"
+    char resource[64]; // "Ex: /movies"
+    // Only for GET
+    char query[64];    // Query param for genre filtering
+    // Only for POST and PUT
+    char title[128];
+    char genre[MAX_GENRES][64];
+    int num_genres;
+    char director[128];
+    int release_year;
+} JsonRequest;
+
 
 void sigchld_handler(int s)
 {
@@ -40,7 +65,95 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+void invalid_request(int new_fd, char loc_err[]){
+    char buffer[100];
+    sprintf(buffer, "Bad Request: Invalid %s", loc_err);
+
+    // create a cJSON object 
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddNumberToObject(res, "status", 400);
+    cJSON_AddStringToObject(res, "message", buffer);
+    
+    // convert the cJSON object to a JSON string 
+   char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
 void handle_request(int new_fd){
+    char res_string[MAXDATASIZE];
+    char req_string[MAXDATASIZE];
+
+    memset(req_string, 0, MAXDATASIZE);
+    recv(new_fd, req_string, MAXDATASIZE, 0);
+    // Debug request string:
+    // printf("Server received JSON:\n%s\n", req_string);
+
+    JsonRequest req;
+    memset(&req, 0, sizeof(JsonRequest));
+
+    // Testing Parsing
+    {
+        cJSON *json = cJSON_Parse(req_string);
+        if (json == NULL) { 
+            const char *error_ptr = cJSON_GetErrorPtr(); 
+            if (error_ptr != NULL) { 
+                printf("Error: %s\n", error_ptr); 
+            } 
+            cJSON_Delete(json); 
+        }
+
+        cJSON *method = cJSON_GetObjectItemCaseSensitive(json, "method");
+        cJSON *resource = cJSON_GetObjectItemCaseSensitive(json, "resource");
+        cJSON *body = cJSON_GetObjectItemCaseSensitive(json, "body");
+        if (cJSON_IsString(method) && (method->valuestring != NULL)) { 
+            strncpy(req.method, method->valuestring, sizeof(req.method) - 1);
+        } else return invalid_request(new_fd, "method");
+        if (cJSON_IsString(resource) && (resource->valuestring != NULL)) { 
+            strncpy(req.resource, resource->valuestring, sizeof(req.resource) - 1);
+        } else return invalid_request(new_fd, "resource");
+        
+        if(strcmp(req.method,"POST") || strcmp(req.method,"PUT")){
+            cJSON *title = cJSON_GetObjectItem(body, "title");
+            cJSON *release_year = cJSON_GetObjectItem(body, "release_year");
+            cJSON *genres = cJSON_GetObjectItem(body, "genre");
+
+            if (cJSON_IsString(title) && (title->valuestring != NULL)) { 
+                strncpy(req.title, title->valuestring, sizeof(req.title) - 1);
+            } else return invalid_request(new_fd, "body.title");
+            if (cJSON_IsNumber(release_year)) { 
+                req.release_year = release_year->valueint;
+            } else return invalid_request(new_fd, "body.release_year");
+
+            
+            // Process genres array
+            if (cJSON_IsArray(genres)) {
+                int count = 0;
+                cJSON *genre;
+                cJSON_ArrayForEach(genre, genres) {
+                    if (cJSON_IsString(genre) && genre->valuestring != NULL) {
+                        strncpy(req.genre[count], genre->valuestring, sizeof(req.genre[count]) - 1);
+                        count++;
+                        if (count >= MAX_GENRES) break;
+                    }
+                }
+                req.num_genres = count;
+                printf("Num genres: %d\n", req.num_genres);
+            } else return invalid_request(new_fd, "body.genre");
+        }
+        if(strcmp(req.method, "GET") && strcmp(req.resource, "movies/genre")){
+            cJSON *query = cJSON_GetObjectItem(body, "query");
+            if (cJSON_IsString(query) && (query->valuestring != NULL)) { 
+                strncpy(req.query, query->valuestring, sizeof(req.query) - 1);
+            } else return invalid_request(new_fd, "body.query");
+        }
+      
+        cJSON_Delete(json);
+    }
+    
+
     if (send(new_fd, "Hello, world!", 13, 0) == -1)
         perror("send");
 }

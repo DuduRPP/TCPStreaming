@@ -1,0 +1,5 @@
+{
+    "method": "GET",
+    "resource": "/movies/1",
+    "body": {}
+  }

@@ -1,0 +1,10 @@
+{
+    "method": "PUT",
+    "resource": "/movies/1",
+    "body": {
+      "title": "Ainda Estou Aqui",
+      "genre": ["Drama","Historical Drama"],
+      "director": "Walter Salles",
+      "release_year": 2024
+    }
+  }

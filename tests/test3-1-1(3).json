@@ -1,0 +1,10 @@
+{
+    "method": "POST",
+    "resource": "/movies",
+    "body": {
+      "title": "Oppenheimer",
+      "genre": ["Suspense", "Historical Drama"],
+      "director": "Greta Gerwig",
+      "release_year": 2023
+    }
+  }

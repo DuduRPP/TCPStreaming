@@ -1,0 +1,10 @@
+{
+    "method": "POST",
+    "resource": "/movies",
+    "body": {
+      "title": "Star Wars IV",
+      "genre": ["Sci-fi", "Action"],
+      "director": "George Lucas",
+      "release_year": 1977
+    }
+  }

@@ -1,0 +1,10 @@
+{
+    "method": "POST",
+    "resource": "/movies",
+    "body": {
+      "title": "Barbie",
+      "genre": ["Comedy", "Fantasy"],
+      "director": "Greta Gerwig",
+      "release_year": 2023
+    }
+  }

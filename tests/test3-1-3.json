@@ -1,0 +1,5 @@
+{
+    "method": "DELETE",
+    "resource": "/movies/2",
+    "body": {}
+  }
