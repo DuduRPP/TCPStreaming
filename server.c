@@ -43,6 +43,79 @@ typedef struct {
     int release_year;
 } JsonRequest;
 
+static int callback(void *NotUsed, int argc, char **argv, char **azColName) {
+   int i;
+   for(i = 0; i<argc; i++) {
+      printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+   }
+   printf("\n");
+   return 0;
+}
+
+int initialize_db(sqlite3* db)
+{
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        return(0);
+    } else {
+        fprintf(stdout, "Opened database successfully\n");
+        fprintf(stdout, "Initializing database...\n");
+    }
+
+    /*
+    sqlite> SELECT * FROM Movie m
+   ...> JOIN Movie_Genre mg on m.ID = mg.MovieID
+   ...> JOIN Genre g ON mg.GenreID = g.id;
+    */
+
+    /* Create SQL statement */
+    sql =
+    "DROP TABLE IF EXISTS Genre;"\
+    "DROP TABLE IF EXISTS Movie;"\
+    "DROP TABLE IF EXISTS Movie_Genre;"\
+    "CREATE TABLE Genre(" \
+        "ID   INTEGER    PRIMARY KEY AUTOINCREMENT,"
+        "Name TEXT                 NOT NULL);"
+    "CREATE TABLE Movie("  \
+        "ID INTEGER PRIMARY KEY AUTOINCREMENT," \
+        "Title          TEXT    NOT NULL," \
+        "Director       TEXT    NOT NULL, " \
+        "ReleaseYear    INT     NOT NULL);"
+    "CREATE TABLE Movie_Genre("\
+        "ID      INT  PRIMARY KEY,"
+        "MovieID INT,"\
+        "GenreID INT,"\
+        "FOREIGN KEY(MovieID) REFERENCES Movie(ID),"\
+        "FOREIGN KEY(GenreID) REFERENCES Genre(ID));"\
+    "INSERT INTO Genre (Name) VALUES ('Action');"\
+    "INSERT INTO Genre (Name) VALUES ('Sci-fi');"\
+    "INSERT INTO Genre (Name) VALUES ('Fantasy');"\
+    "INSERT INTO Genre (Name) VALUES ('Suspense');"\
+    "INSERT INTO Genre (Name) VALUES ('Comedy');"\
+    "INSERT INTO Genre (Name) VALUES ('Drama');"\
+    "INSERT INTO Genre (Name) VALUES ('Historical Drama');"\
+    "INSERT INTO Genre (Name) VALUES ('Horror');";
+
+    /* Execute SQL statement */
+    rc = sqlite3_exec(db, sql, callback, 0, &zErrMsg);
+
+    if( rc != SQLITE_OK ){
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+    } else {
+        fprintf(stdout, "Table created successfully\n");
+    }
+    sqlite3_close(db);
+    return 0;
+
+}
 
 void sigchld_handler(int s)
 {
@@ -82,7 +155,42 @@ void invalid_request(int new_fd, char loc_err[]){
     return ;
 }
 
-void handle_request(int new_fd){
+// POST
+void post_movie(JsonRequest req, sqlite3* db){
+    char *zErrMsg = 0;
+   int rc;
+   char *sql;
+   const char* data = "Callback function called";
+
+   /* Open database */
+   rc = sqlite3_open("test.db", &db);
+   
+   if( rc ) {
+      fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+      return ;
+   } else {
+      fprintf(stderr, "Opened database successfully\n");
+   }
+
+   /* Create SQL statement */
+   sql = "SELECT * from Genre";
+
+   /* Execute SQL statement */
+   rc = sqlite3_exec(db, sql, callback, (void*)data, &zErrMsg);
+   
+   if( rc != SQLITE_OK ) {
+      fprintf(stderr, "SQL error: %s\n", zErrMsg);
+      sqlite3_free(zErrMsg);
+   } else {
+      fprintf(stdout, "Operation done successfully\n");
+   }
+   sqlite3_close(db);
+
+    return ;
+}
+
+
+void handle_request(int new_fd, sqlite3* db){
     char res_string[MAXDATASIZE];
     char req_string[MAXDATASIZE];
 
@@ -115,6 +223,12 @@ void handle_request(int new_fd){
             strncpy(req.resource, resource->valuestring, sizeof(req.resource) - 1);
         } else return invalid_request(new_fd, "resource");
         
+        // DELETE
+        if(strcmp(req.method, "DELETE") == 0){
+
+        }
+
+        // POST & PUT
         if(strcmp(req.method,"POST") || strcmp(req.method,"PUT")){
             cJSON *title = cJSON_GetObjectItem(body, "title");
             cJSON *release_year = cJSON_GetObjectItem(body, "release_year");
@@ -142,13 +256,19 @@ void handle_request(int new_fd){
                 req.num_genres = count;
                 printf("Num genres: %d\n", req.num_genres);
             } else return invalid_request(new_fd, "body.genre");
+
+            return post_movie(req, db);
         }
-        if(strcmp(req.method, "GET") && strcmp(req.resource, "movies/genre")){
+
+        // GET
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/genre") == 0){
             cJSON *query = cJSON_GetObjectItem(body, "query");
             if (cJSON_IsString(query) && (query->valuestring != NULL)) { 
                 strncpy(req.query, query->valuestring, sizeof(req.query) - 1);
             } else return invalid_request(new_fd, "body.query");
         }
+
+        
       
         cJSON_Delete(json);
     }
@@ -168,6 +288,10 @@ int main(void)
     int yes=1;
     char s[INET6_ADDRSTRLEN];
     int rv;
+
+    sqlite3* db;
+
+    initialize_db(db);
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -239,7 +363,7 @@ int main(void)
 
         if (!fork()) { // this is the child process
             close(sockfd); // child doesn't need the listener
-            handle_request(new_fd);
+            handle_request(new_fd, db);
             close(new_fd);
             exit(0);
         }
