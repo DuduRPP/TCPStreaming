@@ -117,7 +117,7 @@ int main(int argc, char *argv[])
             exit(1);
         }
         res[numbytes] = '\0';
-        printf("client: received '%s'\n",res);
+        printf("client: received:\n '%s'\n",res);
     
         // Close server connection socket
         close(sockfd);

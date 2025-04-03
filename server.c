@@ -82,10 +82,10 @@ int initialize_db(sqlite3* db)
     "DROP TABLE IF EXISTS Movie_Genre;"\
     "CREATE TABLE Genre(" \
         "ID   INTEGER    PRIMARY KEY AUTOINCREMENT,"
-        "Name TEXT                 NOT NULL);"
+        "Name TEXT                 NOT NULL UNIQUE);"
     "CREATE TABLE Movie("  \
         "ID INTEGER PRIMARY KEY AUTOINCREMENT," \
-        "Title          TEXT    NOT NULL," \
+        "Title          TEXT    NOT NULL UNIQUE," \
         "Director       TEXT    NOT NULL, " \
         "ReleaseYear    INT     NOT NULL);"
     "CREATE TABLE Movie_Genre("\
@@ -93,15 +93,7 @@ int initialize_db(sqlite3* db)
         "MovieID INT,"\
         "GenreID INT,"\
         "FOREIGN KEY(MovieID) REFERENCES Movie(ID),"\
-        "FOREIGN KEY(GenreID) REFERENCES Genre(ID));"\
-    "INSERT INTO Genre (Name) VALUES ('Action');"\
-    "INSERT INTO Genre (Name) VALUES ('Sci-fi');"\
-    "INSERT INTO Genre (Name) VALUES ('Fantasy');"\
-    "INSERT INTO Genre (Name) VALUES ('Suspense');"\
-    "INSERT INTO Genre (Name) VALUES ('Comedy');"\
-    "INSERT INTO Genre (Name) VALUES ('Drama');"\
-    "INSERT INTO Genre (Name) VALUES ('Historical Drama');"\
-    "INSERT INTO Genre (Name) VALUES ('Horror');";
+        "FOREIGN KEY(GenreID) REFERENCES Genre(ID));";
 
     /* Execute SQL statement */
     rc = sqlite3_exec(db, sql, callback, 0, &zErrMsg);
@@ -155,38 +147,184 @@ void invalid_request(int new_fd, char loc_err[]){
     return ;
 }
 
-// POST
-void post_movie(JsonRequest req, sqlite3* db){
-    char *zErrMsg = 0;
-   int rc;
-   char *sql;
-   const char* data = "Callback function called";
+void server_error(int new_fd, const char loc_err[]){
+    char buffer[100];
+    sprintf(buffer, "Bad Request: Invalid %s", loc_err);
 
-   /* Open database */
-   rc = sqlite3_open("test.db", &db);
-   
-   if( rc ) {
-      fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
-      return ;
-   } else {
-      fprintf(stderr, "Opened database successfully\n");
-   }
+    // create a cJSON object 
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddNumberToObject(res, "status", 500);
+    cJSON_AddStringToObject(res, "message", buffer);
+    
+    // convert the cJSON object to a JSON string 
+   char *res_str = cJSON_Print(res); 
 
-   /* Create SQL statement */
-   sql = "SELECT * from Genre";
-
-   /* Execute SQL statement */
-   rc = sqlite3_exec(db, sql, callback, (void*)data, &zErrMsg);
-   
-   if( rc != SQLITE_OK ) {
-      fprintf(stderr, "SQL error: %s\n", zErrMsg);
-      sqlite3_free(zErrMsg);
-   } else {
-      fprintf(stdout, "Operation done successfully\n");
-   }
-   sqlite3_close(db);
-
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
     return ;
+}
+
+void successful_movie(int new_fd, const char *title, char director[128], int release_year, int movie_id, char genres[][64], int genre_count){
+    char buffer[MAXDATASIZE];
+
+    // create a cJSON object 
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddNumberToObject(res, "status", 200);
+    cJSON_AddStringToObject(res, "message", "Movie created successfully!");
+
+    // Cria um objeto JSON para o filme
+    cJSON *movie = cJSON_CreateObject();
+    cJSON_AddNumberToObject(movie, "id", movie_id);
+    cJSON_AddStringToObject(movie, "title", title);
+    cJSON_AddStringToObject(movie, "director", director);
+    cJSON_AddNumberToObject(movie, "release_year", release_year);
+
+    // Cria um array JSON para os gêneros
+    cJSON *genres_array = cJSON_CreateArray();
+    for (int i = 0; i < genre_count; i++) {
+        cJSON_AddItemToArray(genres_array, cJSON_CreateString(genres[i]));
+    }
+
+    // Adiciona o array de gêneros ao filme
+    cJSON_AddItemToObject(movie, "genres", genres_array);
+
+    // Adiciona o objeto filme ao objeto principal
+    cJSON_AddItemToObject(res, "movie", movie);
+    
+    // convert the cJSON object to a JSON string 
+    char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
+// POST
+void post_movie(int new_fd, JsonRequest req, sqlite3* db){
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+    const char* data = "Callback function called";
+    sqlite3_stmt *stmt;
+
+    // create a cJSON object 
+    cJSON *res = cJSON_CreateObject();
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return ;
+    }
+
+    /* Create SQL statement */
+    sql = "INSERT INTO Movie (Title, Director, ReleaseYear) VALUES (?, ?, ?);";
+
+    /* Prepare statement */
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return;
+    }
+
+    /* Bind values with JSON Request Data */
+    sqlite3_bind_text(stmt, 1, req.title, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, req.director, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, req.release_year);
+
+    /* Execute the statement */
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Execution failed: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+    } else {
+        fprintf(stdout, "Added Movie to DB\n");
+    }
+
+    /* Finalize statement to avoid memory leaks */
+    sqlite3_finalize(stmt);
+
+    /* Get the last inserted Movie ID */
+    int movie_id = (int)sqlite3_last_insert_rowid(db);
+
+    sql = "INSERT INTO Movie_Genre (MovieID, GenreID) VALUES (?, ?);";
+    /* Prepare statement */
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return;
+    }
+
+    /* For each genre in movie JSON Request do a statement */
+    for (int i = 0; i < req.num_genres; i++) {
+        int genre_id = -1;
+
+        /* Check if genre exists */
+        sql = "SELECT ID FROM Genre WHERE Name = ?;";
+        sqlite3_stmt *genre_stmt;
+        rc = sqlite3_prepare_v2(db, sql, -1, &genre_stmt, 0);
+
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "Failed to prepare genre query: %s\n", sqlite3_errmsg(db));
+            server_error(new_fd, sqlite3_errmsg(db));
+            return;
+        }
+
+        sqlite3_bind_text(genre_stmt, 1, req.genre[i], -1, SQLITE_STATIC);
+
+        rc = sqlite3_step(genre_stmt);
+
+        if (rc == SQLITE_ROW) {
+            genre_id = sqlite3_column_int(genre_stmt, 0);
+        }
+        sqlite3_finalize(genre_stmt);
+
+        /* If genre not found, insert it in table with genres */
+        if (genre_id == -1) {
+            sql = "INSERT INTO Genre (Name) VALUES (?);";
+            rc = sqlite3_prepare_v2(db, sql, -1, &genre_stmt, 0);
+
+            if (rc != SQLITE_OK) {
+                fprintf(stderr, "Failed to prepare genre insert: %s\n", sqlite3_errmsg(db));
+                server_error(new_fd, sqlite3_errmsg(db));
+                return;
+            }
+
+            sqlite3_bind_text(genre_stmt, 1, req.genre[i], -1, SQLITE_STATIC);
+
+            rc = sqlite3_step(genre_stmt);
+
+            if (rc != SQLITE_DONE) {
+                fprintf(stderr, "Failed to insert genre: %s\n", sqlite3_errmsg(db));
+                server_error(new_fd, sqlite3_errmsg(db));
+                sqlite3_finalize(genre_stmt);
+                return;
+            }
+
+            genre_id = (int)sqlite3_last_insert_rowid(db);
+            sqlite3_finalize(genre_stmt);
+        }
+
+        /* Insert into Movie_Genre table */
+        sqlite3_bind_int(stmt, 1, movie_id);
+        sqlite3_bind_int(stmt, 2, genre_id);
+
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_DONE) {
+            fprintf(stderr, "Failed to insert into Movie_Genre: %s\n", sqlite3_errmsg(db));
+            server_error(new_fd, sqlite3_errmsg(db));
+        }
+        sqlite3_reset(stmt);
+    }
+
+    sqlite3_finalize(stmt);
+
+    return successful_movie(new_fd, req.title, req.director, req.release_year, movie_id,req.genre, req.num_genres);
+
 }
 
 
@@ -229,13 +367,17 @@ void handle_request(int new_fd, sqlite3* db){
         }
 
         // POST & PUT
-        if(strcmp(req.method,"POST") || strcmp(req.method,"PUT")){
+        if(strcmp(req.method,"POST") == 0 || strcmp(req.method,"PUT") == 0){
             cJSON *title = cJSON_GetObjectItem(body, "title");
             cJSON *release_year = cJSON_GetObjectItem(body, "release_year");
+            cJSON *director = cJSON_GetObjectItem(body, "director");
             cJSON *genres = cJSON_GetObjectItem(body, "genre");
 
             if (cJSON_IsString(title) && (title->valuestring != NULL)) { 
                 strncpy(req.title, title->valuestring, sizeof(req.title) - 1);
+            } else return invalid_request(new_fd, "body.title");
+            if (cJSON_IsString(director) && (director->valuestring != NULL)) { 
+                strncpy(req.director, director->valuestring, sizeof(req.director) - 1);
             } else return invalid_request(new_fd, "body.title");
             if (cJSON_IsNumber(release_year)) { 
                 req.release_year = release_year->valueint;
@@ -254,18 +396,31 @@ void handle_request(int new_fd, sqlite3* db){
                     }
                 }
                 req.num_genres = count;
-                printf("Num genres: %d\n", req.num_genres);
             } else return invalid_request(new_fd, "body.genre");
 
-            return post_movie(req, db);
+            if(strcmp(req.method,"POST") == 0){
+                return post_movie(new_fd, req, db);
+            } else {
+            
+            }
+            
         }
 
         // GET
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/") == 0){
+            return ;
+        }
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/detail") == 0){
+            return ;
+        }
         if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/genre") == 0){
             cJSON *query = cJSON_GetObjectItem(body, "query");
             if (cJSON_IsString(query) && (query->valuestring != NULL)) { 
                 strncpy(req.query, query->valuestring, sizeof(req.query) - 1);
             } else return invalid_request(new_fd, "body.query");
+        }
+        else{
+            return ;
         }
 
         
