@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <stdbool.h>
 
 // Include base C socket programming libraries
 #include <sys/types.h>
@@ -43,15 +44,52 @@ typedef struct {
     int release_year;
 } JsonRequest;
 
-static int callback(void *NotUsed, int argc, char **argv, char **azColName) {
+static int callback(void *response_ptr, int argc, char **argv, char **azColName) {
    int i;
-   for(i = 0; i<argc; i++) {
-      printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
-   }
-   printf("\n");
+   cJSON *res = (cJSON*) response_ptr;
+   cJSON *movies_array = cJSON_GetObjectItem(res, "movies");
+
+    // Create movies array for response
+    if(!movies_array){
+        movies_array = cJSON_CreateArray();
+        cJSON_AddItemToObject(res, "movies", movies_array);
+    }
+
+    // Create a new movie object
+    cJSON *movie_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(movie_obj, "id", atoi(argv[0]));
+    cJSON_AddStringToObject(movie_obj, "title", argv[1]);
+
+    if(argv[2] != NULL && argv[3] != NULL){
+        cJSON_AddStringToObject(movie_obj, "director", argv[2]);
+        cJSON_AddNumberToObject(movie_obj, "release_year", atoi(argv[3]));
+    }
+    
+
+    // Create a Genres array
+    if (argv[4] != NULL) {
+        cJSON *genres_array = cJSON_CreateArray();
+        char *genre_token = strtok(argv[4], ", ");
+        while (genre_token != NULL) {
+            cJSON_AddItemToArray(genres_array, cJSON_CreateString(genre_token));
+            genre_token = strtok(NULL, ",");
+        }
+        cJSON_AddItemToObject(movie_obj, "genre", genres_array);
+    }
+
+    cJSON_AddItemToArray(movies_array, movie_obj);
+    
+//    Used for debugging SELECT operations
+//    for(i = 0; i<argc; i++) {
+//       printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+//    }
+//   printf("\n");
+
+
    return 0;
 }
 
+// Initialize Database
 int initialize_db(sqlite3* db)
 {
     char *zErrMsg = 0;
@@ -119,7 +157,6 @@ void sigchld_handler(int s)
     errno = saved_errno;
 }
 
-
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -130,6 +167,7 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+// Send server response of error (400) for request format error
 void invalid_request(int new_fd, char loc_err[]){
     char buffer[100];
     sprintf(buffer, "Bad Request: Invalid %s", loc_err);
@@ -147,9 +185,27 @@ void invalid_request(int new_fd, char loc_err[]){
     return ;
 }
 
+// Send server response of error (404) for resource Not Found request error
+void not_found(int new_fd){
+    char buffer[] = "Not Found: Could not find requested resources";
+
+    // create a cJSON object 
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddNumberToObject(res, "status", 404);
+    cJSON_AddStringToObject(res, "message", buffer);
+    
+    // convert the cJSON object to a JSON string 
+   char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
+// Send server response of error (500) for server internal error
 void server_error(int new_fd, const char loc_err[]){
     char buffer[100];
-    sprintf(buffer, "Bad Request: Invalid %s", loc_err);
+    sprintf(buffer, "Server Internal Error: %s", loc_err);
 
     // create a cJSON object 
     cJSON *res = cJSON_CreateObject();
@@ -164,13 +220,14 @@ void server_error(int new_fd, const char loc_err[]){
     return ;
 }
 
+// Send server response of success for creation of a new movie in DB
 void successful_movie(int new_fd, const char *title, char director[128], int release_year, int movie_id, char genres[][64], int genre_count){
     char buffer[MAXDATASIZE];
 
     // create a cJSON object 
     cJSON *res = cJSON_CreateObject();
     cJSON_AddNumberToObject(res, "status", 200);
-    cJSON_AddStringToObject(res, "message", "Movie created successfully!");
+    cJSON_AddStringToObject(res, "message", "Movie created successfully");
 
     // Cria um objeto JSON para o filme
     cJSON *movie = cJSON_CreateObject();
@@ -186,7 +243,7 @@ void successful_movie(int new_fd, const char *title, char director[128], int rel
     }
 
     // Adiciona o array de gêneros ao filme
-    cJSON_AddItemToObject(movie, "genres", genres_array);
+    cJSON_AddItemToObject(movie, "genre", genres_array);
 
     // Adiciona o objeto filme ao objeto principal
     cJSON_AddItemToObject(res, "movie", movie);
@@ -199,7 +256,33 @@ void successful_movie(int new_fd, const char *title, char director[128], int rel
     return ;
 }
 
+// Send server response for successful query in DB for movies
+void successful_query(int new_fd, cJSON *res){
+    cJSON_AddNumberToObject(res, "status", 200);
+    cJSON_AddStringToObject(res, "message", "Successfully found movies");
+    // convert the cJSON object to a JSON string 
+    char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
+// Send server response for successful query in DB for a single movie
+void successful_query_one(int new_fd, cJSON *res){
+    cJSON_AddNumberToObject(res, "status", 200);
+    cJSON_AddStringToObject(res, "message", "Successfully found movie");
+    // convert the cJSON object to a JSON string 
+    char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
+
 // POST
+// Add new movie to DB and send server adequate response
 void post_movie(int new_fd, JsonRequest req, sqlite3* db){
     char *zErrMsg = 0;
     int rc;
@@ -327,6 +410,195 @@ void post_movie(int new_fd, JsonRequest req, sqlite3* db){
 
 }
 
+// GET
+// Get all movies from DB and the server send to client as response 
+void get_all(int new_fd, JsonRequest req, sqlite3* db, bool withDetail){
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+    cJSON *res = cJSON_CreateObject();
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    sql = "SELECT ID, Title from Movie";
+    /* Create SQL statement */
+    if(withDetail){
+        sql = "SELECT m.ID, Title, Director, ReleaseYear, GROUP_CONCAT(Name, ', ') AS Genre FROM Movie m "\
+            "JOIN Movie_Genre mg on m.ID = mg.MovieID "\
+            "JOIN Genre g ON mg.GenreID = g.id "\
+            "GROUP BY m.ID";
+    }
+    
+    /* Execute SQL statement */
+    rc = sqlite3_exec(db, sql, callback, res, &zErrMsg);
+
+    if( rc != SQLITE_OK ) {
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+        server_error(new_fd, sqlite3_errmsg(db));
+    } else {
+        fprintf(stdout, "Operation done successfully\n");
+    }
+    
+    successful_query(new_fd, res);
+
+    return ;
+}
+
+// Get all movies that have the same genre requested from DB and the server send to client as response 
+void get_by_genre(int new_fd, JsonRequest req, sqlite3* db){
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+    sqlite3_stmt *stmt;
+    cJSON *res = cJSON_CreateObject();
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    sql = "SELECT m.ID, Title, Director, ReleaseYear, GROUP_CONCAT(Name, ', ') AS Genre FROM Movie m "\
+        "JOIN Movie_Genre mg on m.ID = mg.MovieID "\
+        "JOIN Genre g ON mg.GenreID = g.id "\
+        "WHERE g.Name = ? "\
+        "GROUP BY m.ID";
+
+    // Prepare the SQL statement
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    // Bind the genre name to the statement
+    rc = sqlite3_bind_text(stmt, 1, req.query, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to bind parameter: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    // Execute the prepared statement with the callback function
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        char *row_data[5];
+        for (int i = 0; i < 5; i++) {
+            row_data[i] = (char *)sqlite3_column_text(stmt, i);
+        }
+        callback(res, 5, row_data, NULL);
+    }
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Query execution error: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    // Cleanup
+    sqlite3_finalize(stmt);
+
+    
+    successful_query(new_fd, res);
+
+    return ;
+}
+
+// Get a movies that have the matching ID from JSON Request Query and send it as JSON Response
+void get_one(int new_fd, JsonRequest req, sqlite3* db){
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+    sqlite3_stmt *stmt;
+    cJSON *res = cJSON_CreateObject();
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return ;
+    }
+
+    sql = "SELECT m.ID, Title, Director, ReleaseYear, GROUP_CONCAT(Name, ', ') AS Genre FROM Movie m "\
+        "JOIN Movie_Genre mg on m.ID = mg.MovieID "\
+        "JOIN Genre g ON mg.GenreID = g.id "\
+        "WHERE m.ID = ? ";
+
+    // Prepare the SQL statement
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return;
+    }
+
+    
+    // Extract the movie ID from the URL
+    int movie_id = atoi(req.resource + 8); // Skip "/movies/"
+
+    // Bind the route ID to the statement
+    rc = sqlite3_bind_int(stmt, 1, movie_id);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to bind parameter: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    // Only one row, so its better to not use the callback function
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        // Create JSON response
+        cJSON *movie_obj = cJSON_CreateObject();
+
+        cJSON_AddNumberToObject(movie_obj, "id", sqlite3_column_int(stmt, 0));
+        cJSON_AddStringToObject(movie_obj, "title", (const char*)sqlite3_column_text(stmt, 1));
+        cJSON_AddStringToObject(movie_obj, "director", (const char*)sqlite3_column_text(stmt, 2));
+        cJSON_AddNumberToObject(movie_obj, "release_year", sqlite3_column_int(stmt, 3));
+
+        // Parse the concatenated genre string into a JSON array
+        cJSON *genres_array = cJSON_CreateArray();
+        const char *genres_str = (const char*)sqlite3_column_text(stmt, 4);
+        if (genres_str != NULL) {
+            char *genres_copy = strdup(genres_str);
+            char *token = strtok(genres_copy, ",");
+            while (token != NULL) {
+                cJSON_AddItemToArray(genres_array, cJSON_CreateString(token));
+                token = strtok(NULL, ",");
+            }
+            free(genres_copy);
+        }
+
+        cJSON_AddItemToObject(movie_obj, "genre", genres_array);
+        cJSON_AddItemToObject(res, "movie", movie_obj);
+
+    } else if (rc == SQLITE_DONE) {
+        return not_found(new_fd);
+    } else {
+        fprintf(stderr, "Failed to execute statement: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    // Cleanup
+    sqlite3_finalize(stmt);
+    
+    successful_query_one(new_fd, res);
+
+    return ;
+}
+
+// DELETE
+
+// PUT
 
 void handle_request(int new_fd, sqlite3* db){
     char res_string[MAXDATASIZE];
@@ -407,20 +679,21 @@ void handle_request(int new_fd, sqlite3* db){
         }
 
         // GET
-        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/") == 0){
-            return ;
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "/movies") == 0){
+            return get_all(new_fd, req, db, false);
         }
-        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/detail") == 0){
-            return ;
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "/movies/detail") == 0){
+            return get_all(new_fd, req, db, true);
         }
-        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "movies/genre") == 0){
+        if(strcmp(req.method, "GET") == 0 && strcmp(req.resource, "/movies/genre") == 0){
             cJSON *query = cJSON_GetObjectItem(body, "query");
             if (cJSON_IsString(query) && (query->valuestring != NULL)) { 
                 strncpy(req.query, query->valuestring, sizeof(req.query) - 1);
             } else return invalid_request(new_fd, "body.query");
+            return get_by_genre(new_fd, req, db);
         }
         else{
-            return ;
+            return get_one(new_fd, req, db);
         }
 
         
