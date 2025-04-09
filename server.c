@@ -280,6 +280,29 @@ void successful_query_one(int new_fd, cJSON *res){
     return ;
 }
 
+// Send server response for successful update in DB for a single movie
+void successful_update_one(int new_fd, cJSON *res){
+    cJSON_AddNumberToObject(res, "status", 200);
+    cJSON_AddStringToObject(res, "message", "Successfully updated movie");
+    // convert the cJSON object to a JSON string 
+    char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
+
+// Send server response for successful query in DB for a single movie
+void successful_delete(int new_fd, cJSON *res){
+    cJSON_AddNumberToObject(res, "status", 200);
+    cJSON_AddStringToObject(res, "message", "Deleted successfully");
+    // convert the cJSON object to a JSON string 
+    char *res_str = cJSON_Print(res); 
+
+    if (send(new_fd, res_str, MAXDATASIZE, 0) == -1)
+        perror("send");
+    return ;
+}
 
 // POST
 // Add new movie to DB and send server adequate response
@@ -458,6 +481,9 @@ void get_by_genre(int new_fd, JsonRequest req, sqlite3* db){
     char *sql;
     sqlite3_stmt *stmt;
     cJSON *res = cJSON_CreateObject();
+    // Need to add movies array before in this case because of calls to callbacks by rows
+    cJSON *movies_array = cJSON_CreateArray();
+    cJSON_AddItemToObject(res, "movies", movies_array);
 
     /* Open database */
     rc = sqlite3_open("test.db", &db);
@@ -557,6 +583,11 @@ void get_one(int new_fd, JsonRequest req, sqlite3* db){
     // Only one row, so its better to not use the callback function
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
+        if(sqlite3_column_int(stmt, 0) == 0){
+            sqlite3_finalize(stmt);
+            return not_found(new_fd);
+        }
+        
         // Create JSON response
         cJSON *movie_obj = cJSON_CreateObject();
 
@@ -597,8 +628,178 @@ void get_one(int new_fd, JsonRequest req, sqlite3* db){
 }
 
 // DELETE
+void delete_one(int new_fd, JsonRequest req, sqlite3* db){
+    char *zErrMsg = 0;
+    int rc;
+    char *sql;
+    sqlite3_stmt *stmt;
+    cJSON *res = cJSON_CreateObject();
+
+    // Extract the movie ID from the URL
+    int movie_id = atoi(req.resource + 8); // Skip "/movies/"
+
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+
+    if( rc ) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return ;
+    }
+
+    // DELETE MOVIE GENRES BY MOVIE ID
+
+    sql = "DELETE FROM Movie_Genre WHERE MovieID = ?;";
+
+    // Prepare the SQL statement
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return;
+    }
+
+    sqlite3_bind_int(stmt, 1, movie_id);
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Failed to delete movie genres: %s\n", sqlite3_errmsg(db));
+    }
+
+    // Cleanup
+    sqlite3_finalize(stmt);
+
+    // DELETE MOVIE BY MOVIE ID
+
+    sql = "DELETE FROM Movie WHERE ID = ?;";
+
+    // Prepare the SQL statement
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        server_error(new_fd, sqlite3_errmsg(db));
+        return;
+    }
+
+    sqlite3_bind_int(stmt, 1, movie_id);
+    rc = sqlite3_step(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Failed to delete movie genres: %s\n", sqlite3_errmsg(db));
+    }
+
+    // Cleanup
+    sqlite3_finalize(stmt);
+
+    return successful_delete(new_fd, res);
+}
 
 // PUT
+void update_one(int new_fd, JsonRequest req, sqlite3* db){
+    int rc;
+    const char *sql;
+    sqlite3_stmt *stmt;
+    cJSON *res = cJSON_CreateObject();
+    
+    /* Open database */
+    rc = sqlite3_open("test.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+
+    // Extract the movie ID from the URL
+    int movie_id = atoi(req.resource + 8); // Skip "/movies/"
+
+    // Prepare SQL update query for Movie table
+    sql = "UPDATE Movie SET Title = ?, Director = ?, ReleaseYear = ? WHERE ID = ?;";
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+
+    // Bind values to the prepared statement
+    sqlite3_bind_text(stmt, 1, req.title, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, req.director, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, req.release_year);
+    sqlite3_bind_int(stmt, 4, movie_id);
+
+    // Execute the update statement
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Failed to update movie: %s\n", sqlite3_errmsg(db));
+        return server_error(new_fd, sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(stmt);
+
+    // Delete old genre associations for the movie
+    sql = "DELETE FROM Movie_Genre WHERE MovieID = ?;";
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_bind_int(stmt, 1, movie_id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Insert new genres
+    sql = "INSERT INTO Movie_Genre (MovieID, GenreID) VALUES (?, (SELECT ID FROM Genre WHERE Name = ?));";
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+
+    for (int i = 0; i < req.num_genres; i++) {
+        char* genre = req.genre[i];
+        sqlite3_bind_int(stmt, 1, movie_id);
+        sqlite3_bind_text(stmt, 2, genre, -1, SQLITE_TRANSIENT);
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_DONE) {
+            fprintf(stderr, "Failed to insert genre: %s\n", sqlite3_errmsg(db));
+            return server_error(new_fd, sqlite3_errmsg(db));
+        }
+        sqlite3_reset(stmt);
+    }
+
+    sqlite3_finalize(stmt);
+
+    printf("Movie updated successfully.\n");
+
+    // Retrieve the updated movie
+    sql = "SELECT m.ID, Title, Director, ReleaseYear, GROUP_CONCAT(g.Name, ',') AS Genres "
+          "FROM Movie m "
+          "LEFT JOIN Movie_Genre mg ON m.ID = mg.MovieID "
+          "LEFT JOIN Genre g ON mg.GenreID = g.id "
+          "WHERE m.ID = ? "
+          "GROUP BY m.ID;";
+          
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_bind_int(stmt, 1, movie_id);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        cJSON *movie_obj = cJSON_CreateObject();
+
+        cJSON_AddNumberToObject(movie_obj, "id", sqlite3_column_int(stmt, 0));
+        cJSON_AddStringToObject(movie_obj, "title", (const char*)sqlite3_column_text(stmt, 1));
+        cJSON_AddStringToObject(movie_obj, "director", (const char*)sqlite3_column_text(stmt, 2));
+        cJSON_AddNumberToObject(movie_obj, "release_year", sqlite3_column_int(stmt, 3));
+
+        // Parse genres
+        cJSON *genres_array = cJSON_CreateArray();
+        const char *genres_str = (const char*)sqlite3_column_text(stmt, 4);
+        if (genres_str != NULL) {
+            char *genres_copy = strdup(genres_str);
+            char *token = strtok(genres_copy, ",");
+            while (token != NULL) {
+                cJSON_AddItemToArray(genres_array, cJSON_CreateString(token));
+                token = strtok(NULL, ",");
+            }
+            free(genres_copy);
+        }
+
+        cJSON_AddItemToObject(movie_obj, "genre", genres_array);
+        cJSON_AddItemToObject(res, "movie", movie_obj);
+    }
+
+    sqlite3_finalize(stmt);
+
+    return successful_update_one(new_fd, res);
+}
 
 void handle_request(int new_fd, sqlite3* db){
     char res_string[MAXDATASIZE];
@@ -635,7 +836,7 @@ void handle_request(int new_fd, sqlite3* db){
         
         // DELETE
         if(strcmp(req.method, "DELETE") == 0){
-
+            return delete_one(new_fd, req, db);
         }
 
         // POST & PUT
@@ -673,7 +874,7 @@ void handle_request(int new_fd, sqlite3* db){
             if(strcmp(req.method,"POST") == 0){
                 return post_movie(new_fd, req, db);
             } else {
-            
+                return update_one(new_fd, req, db);
             }
             
         }
@@ -696,8 +897,6 @@ void handle_request(int new_fd, sqlite3* db){
             return get_one(new_fd, req, db);
         }
 
-        
-      
         cJSON_Delete(json);
     }
     
